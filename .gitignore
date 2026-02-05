@@ -1,0 +1,24 @@
+# .NET
+bin/
+obj/
+[Ee]bug/
+[Rr]elease/
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Large Test Data
+test_large_*.json
+source.json
+target.json
+generate_test_data.ps1
+
+# Artifacts/Temp
+.gemini/
+wwwroot/reports/
