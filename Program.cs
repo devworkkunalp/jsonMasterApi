@@ -2,7 +2,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.AspNetCore.Http.Features;
-using Newtonsoft.Json.Linq;
 using JsonMaster.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -15,12 +14,7 @@ builder.Services.AddScoped<SmartCompareService>();
 builder.Services.AddScoped<TextDiffService>();
 builder.Services.AddMemoryCache();
 
-// Global Newtonsoft settings for camelCase
-var newtonsoftSettings = new Newtonsoft.Json.JsonSerializerSettings
-{
-    ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver(),
-    Formatting = Newtonsoft.Json.Formatting.None
-};
+
 
 // Increase Form Limits for large uploads
 builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(options =>
@@ -174,24 +168,27 @@ app.MapPost("/api/compare/smart", async (HttpContext context, SmartCompareServic
     var form = await context.Request.ReadFormAsync();
     string keyField = form["keyField"].ToString();
     string ignoredFields = form["ignoredFields"].ToString();
-    string sourceJson = "", targetJson = "";
 
+    ComparisonResult? result = null;
     try {
+        Stream? s1 = null;
+        Stream? s2 = null;
+
         if (form.Files.Count == 2) {
-            using var r1 = new StreamReader(form.Files[0].OpenReadStream());
-            using var r2 = new StreamReader(form.Files[1].OpenReadStream());
-            sourceJson = await r1.ReadToEndAsync();
-            targetJson = await r2.ReadToEndAsync();
+            s1 = form.Files[0].OpenReadStream();
+            s2 = form.Files[1].OpenReadStream();
         } else {
-             sourceJson = form["json1"].ToString();
-             targetJson = form["json2"].ToString();
+             var j1 = form["json1"].ToString();
+             var j2 = form["json2"].ToString();
+             if (!string.IsNullOrEmpty(j1)) s1 = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(j1));
+             if (!string.IsNullOrEmpty(j2)) s2 = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(j2));
         }
 
-        if (string.IsNullOrEmpty(sourceJson) || string.IsNullOrEmpty(targetJson)) {
+        if (s1 == null || s2 == null) {
             return Results.BadRequest(new { error = "Missing JSON content" });
         }
 
-        var result = smartService.CompareJsons(sourceJson, targetJson, keyField, ignoredFields);
+        result = await smartService.CompareJsonsAsync(s1, s2, keyField, ignoredFields);
         if (!string.IsNullOrEmpty(result.ValidationError)) {
             return Results.BadRequest(new { error = result.ValidationError });
         }
@@ -204,10 +201,19 @@ app.MapPost("/api/compare/smart", async (HttpContext context, SmartCompareServic
             unchanged = result.Unchanged
         };
         
-        var json = Newtonsoft.Json.JsonConvert.SerializeObject(response, newtonsoftSettings);
-        return Results.Text(json, "application/json");
+        // Manual serialization so we can dispose 'result' (and its JsonDocuments) after writing to response
+        context.Response.ContentType = "application/json";
+        await System.Text.Json.JsonSerializer.SerializeAsync(context.Response.Body, response, new System.Text.Json.JsonSerializerOptions 
+        { 
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+        });
+        
+        return Results.Empty; // Response already written
     } catch (Exception ex) {
         return Results.Json(new { error = ex.Message }, statusCode: 500);
+    } finally {
+        result?.Dispose();
     }
 }).DisableAntiforgery();
 
@@ -225,11 +231,10 @@ app.MapPost("/api/compare/text", async (HttpContext context, TextDiffService tex
         TextDiffService.DiffSession? session;
         if (form.Files.Count == 2) {
              var newSessionId = Guid.NewGuid().ToString();
-             using var r1 = new StreamReader(form.Files[0].OpenReadStream());
-             using var r2 = new StreamReader(form.Files[1].OpenReadStream());
-             var s = await r1.ReadToEndAsync();
-             var t = await r2.ReadToEndAsync();
-             session = textService.InitializeSession(s, t);
+             var s1 = form.Files[0].OpenReadStream();
+             var s2 = form.Files[1].OpenReadStream();
+             
+             session = await textService.InitializeSessionAsync(s1, s2);
              memoryCache.Set(newSessionId, session, TimeSpan.FromHours(1));
              sessionId = newSessionId;
         } else if (!string.IsNullOrEmpty(sessionId)) {
@@ -261,5 +266,14 @@ app.MapPost("/api/compare/text", async (HttpContext context, TextDiffService tex
 }).DisableAntiforgery();
 
 // Configure the port for Render or other environments
-var port = Environment.GetEnvironmentVariable("PORT")  ?? "10000";
-app.Run($"http://0.0.0.0:{port}");
+var port = Environment.GetEnvironmentVariable("PORT");
+if (string.IsNullOrEmpty(port))
+{
+    // Use default (e.g., 5007 from launchSettings.json) when running locally
+    app.Run();
+}
+else
+{
+    // Bind to the port assigned by Render
+    app.Run($"http://0.0.0.0:{port}");
+}

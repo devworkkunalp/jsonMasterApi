@@ -1,4 +1,5 @@
 using System.Text;
+using System.IO;
 
 namespace JsonMaster.Api.Services;
 
@@ -32,25 +33,47 @@ public class TextDiffService
         public int TotalLines { get; set; }
     }
 
-    // Heavy operation - run once per file pair
-    public DiffSession InitializeSession(string source, string target)
+    // New Stream-based initialization to save memory
+    public async Task<DiffSession> InitializeSessionAsync(Stream sourceStream, Stream targetStream)
     {
+        var sourceLines = new List<string>();
+        var targetLines = new List<string>();
+        
+        long sourceSize = 0;
+        long targetSize = 0;
+
+        using (var reader = new StreamReader(sourceStream))
+        {
+            string? line;
+            while ((line = await reader.ReadLineAsync()) != null)
+            {
+                sourceLines.Add(line);
+                sourceSize += line.Length;
+            }
+        }
+
+        using (var reader = new StreamReader(targetStream))
+        {
+            string? line;
+            while ((line = await reader.ReadLineAsync()) != null)
+            {
+                targetLines.Add(line);
+                targetSize += line.Length;
+            }
+        }
+
         var session = new DiffSession
         {
-            SourceSize = source.Length,
-            TargetSize = target.Length
+            SourceLines = sourceLines.ToArray(),
+            TargetLines = targetLines.ToArray(),
+            SourceSize = sourceSize,
+            TargetSize = targetSize,
+            TotalLines = Math.Max(sourceLines.Count, targetLines.Count)
         };
 
-        // Split lines once
-        session.SourceLines = source.Split('\n');
-        session.TargetLines = target.Split('\n');
-
-        int maxLines = Math.Max(session.SourceLines.Length, session.TargetLines.Length);
-        session.TotalLines = maxLines;
-
-        // Count differences once
+        // Count differences
         int totalDiffs = 0;
-        for (int i = 0; i < maxLines; i++)
+        for (int i = 0; i < session.TotalLines; i++)
         {
             var srcLine = i < session.SourceLines.Length ? session.SourceLines[i].TrimEnd('\r') : null;
             var tgtLine = i < session.TargetLines.Length ? session.TargetLines[i].TrimEnd('\r') : null;
@@ -65,7 +88,6 @@ public class TextDiffService
         return session;
     }
 
-    // Light operation - run on every scroll
     public DiffResult GetPage(DiffSession session, int startLine = 1, int lineCount = 100)
     {
         var result = new DiffResult
@@ -117,13 +139,6 @@ public class TextDiffService
         }
 
         return result;
-    }
-
-    public DiffResult CompareText(string source, string target, int startLine = 1, int lineCount = 100)
-    {
-        // Legacy fallback - not efficient
-        var session = InitializeSession(source, target);
-        return GetPage(session, startLine, lineCount);
     }
 
     private string TruncateLine(string line, int maxLength)
